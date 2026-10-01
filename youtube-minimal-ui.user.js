@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         YouTube Minimal UI - Home Only
+// @name         YouTube Focus UI - Home Only
 // @namespace    local.youtube.focus.ui
-// @version      12.4.0
-// @description  YouTube 홈 피드만 조회수 기준 한 줄 목록으로 정리합니다.
+// @version      13.1.0
+// @description  홈 영상을 채널 이미지와 제목, 채널명·업로드 시점·만 단위 조회수 목록으로 표시.
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
 // @run-at       document-start
@@ -13,33 +13,14 @@
   'use strict';
 
   const ROOT_CLASS = 'yt-focus-minimal';
-  const DONE_ATTR = 'data-yt-focus-done';
-  const RETRY_ATTR = 'data-yt-focus-retries';
+  const PROCESSED = 'yt-focus-processed';
+  const FILTERED = 'yt-focus-filtered';
 
   const CONFIG = Object.freeze({
     MIN_VIEWS: 10000,
-    MIN_AGE_FOR_VELOCITY_HOURS: 1,
-    AGE_HALF_LIFE_DAYS: 21,
-
-    VELOCITY_WEIGHT: 0.42,
-    VIEW_WEIGHT: 0.28,
-    LENGTH_WEIGHT: 0.10,
-    FRESHNESS_WEIGHT: 0.20,
-
-    TOP_TIER: 0.95,
-    IMPORTANT_TIER: 0.80,
-    LOW_TIER: 0.20,
-    VERY_LOW_TIER: 0.05,
-
-    BASE_WEIGHT: 360,
-    IMPORTANT_WEIGHT: 470,
-    TOP_WEIGHT: 590,
-    LOW_OPACITY: 0.78,
-    VERY_LOW_OPACITY: 0.50,
-
-    RETRY_DELAY_MS: 500,
-    MAX_RETRIES: 12,
-    ROW_HEIGHT: 36
+    ROW_HEIGHT: 60,
+    AVATAR_SIZE: 40,
+    RESCAN_INTERVAL_MS: 1000
   });
 
   const CARD_SELECTOR = [
@@ -51,28 +32,42 @@
   const TITLE_SELECTOR = [
     'a#video-title',
     'a#video-title-link',
-    'h3 a',
-    'yt-lockup-metadata-view-model a'
+    'h3 a[href*="/watch?"]',
+    'yt-lockup-metadata-view-model a[href*="/watch?"]'
   ].join(',');
 
   const CHANNEL_SELECTOR = [
     'ytd-channel-name a',
     '#channel-name a',
-    'yt-content-metadata-view-model a[href^="/@"]'
+    'yt-content-metadata-view-model a[href*="/@"]',
+    'yt-content-metadata-view-model a[href*="/channel/"]',
+    'yt-content-metadata-view-model a[href*="/c/"]',
+    'yt-content-metadata-view-model a[href*="/user/"]'
   ].join(',');
 
-  const AGE_SELECTOR = [
+  const META_SELECTOR = [
     '#metadata-line span',
     '.inline-metadata-item',
+    'yt-content-metadata-view-model .yt-content-metadata-view-model__metadata-text',
     'yt-content-metadata-view-model span'
+  ].join(',');
+
+  const AVATAR_SELECTOR = [
+    'a#avatar-link img',
+    '#avatar img',
+    'yt-avatar-shape img',
+    'yt-decorated-avatar-view-model img',
+    'yt-avatar-view-model img',
+    'a[href*="/@"] img',
+    'a[href*="/channel/"] img'
   ].join(',');
 
   const css = `
     html.${ROOT_CLASS} {
-      --yt-focus-text: #f1f1f1;
-      --yt-focus-muted: #8b8b8b;
-      --yt-focus-line: rgba(255,255,255,.085);
-      --yt-focus-accent: #f1f1f1;
+      --focus-text: var(--yt-spec-text-primary, #f1f1f1);
+      --focus-muted: var(--yt-spec-text-secondary, #aaa);
+      --focus-line: var(--yt-spec-10-percent-layer, rgba(128,128,128,.18));
+      --focus-hover: var(--yt-spec-badge-chip-background, rgba(128,128,128,.10));
     }
 
     html.${ROOT_CLASS} ytd-rich-grid-renderer {
@@ -81,9 +76,14 @@
       --ytd-rich-grid-row-margin: 0 !important;
     }
 
-    html.${ROOT_CLASS} ytd-rich-grid-renderer ytd-rich-item-renderer,
-    html.${ROOT_CLASS} ytd-rich-grid-renderer ytd-video-renderer,
-    html.${ROOT_CLASS} ytd-rich-grid-renderer ytd-grid-video-renderer {
+    html.${ROOT_CLASS} ytd-rich-grid-renderer ytd-rich-item-renderer {
+      width: 100% !important;
+      max-width: none !important;
+      margin-left: 0 !important;
+      margin-right: 0 !important;
+    }
+
+    html.${ROOT_CLASS} .${PROCESSED} {
       display: block !important;
       width: 100% !important;
       max-width: none !important;
@@ -93,728 +93,739 @@
       margin: 0 !important;
       padding: 0 !important;
       overflow: hidden !important;
+      box-sizing: border-box !important;
     }
 
-    html.${ROOT_CLASS} .yt-focus-filtered {
+    html.${ROOT_CLASS} .${PROCESSED} > :not(.yt-focus-row) {
       display: none !important;
     }
 
-    html.${ROOT_CLASS} ytd-thumbnail,
-    html.${ROOT_CLASS} yt-thumbnail-view-model,
-    html.${ROOT_CLASS} .yt-thumbnail-container {
+    html.${ROOT_CLASS} .${FILTERED} {
       display: none !important;
+    }
+
+    .yt-focus-row {
+      display: none;
     }
 
     html.${ROOT_CLASS} .yt-focus-row {
       display: grid !important;
-      grid-template-columns: minmax(0, 1fr) 70px minmax(90px, .20fr) !important;
+      grid-template-columns: ${CONFIG.AVATAR_SIZE}px minmax(0,1fr) !important;
+      column-gap: 12px !important;
       align-items: center !important;
-      width: 100% !important;
       height: ${CONFIG.ROW_HEIGHT}px !important;
+      width: 100% !important;
       box-sizing: border-box !important;
-      padding: 8px 12px !important;
-      border-bottom: 1px solid var(--yt-focus-line) !important;
-      font-size: 13px !important;
-      line-height: 20px !important;
-      transition: background .18s ease !important;
+      padding: 9px 12px !important;
+      border-bottom: 1px solid var(--focus-line) !important;
+      text-align: left !important;
     }
 
     html.${ROOT_CLASS} .yt-focus-row:hover {
-      background: rgba(255,255,255,.055) !important;
+      background: var(--focus-hover) !important;
+    }
+
+    html.${ROOT_CLASS} .yt-focus-avatar {
+      display: flex !important;
+      align-items: center !important;
+      justify-content: center !important;
+      width: ${CONFIG.AVATAR_SIZE}px !important;
+      height: ${CONFIG.AVATAR_SIZE}px !important;
+      overflow: hidden !important;
+      border-radius: 50% !important;
+      background: var(--focus-hover) !important;
+      color: var(--focus-muted) !important;
+      text-decoration: none !important;
+      font-size: 16px !important;
+      font-weight: 400 !important;
+    }
+
+    html.${ROOT_CLASS} .yt-focus-avatar img {
+      display: block !important;
+      width: 100% !important;
+      height: 100% !important;
+      object-fit: cover !important;
+      border-radius: inherit !important;
+    }
+
+    html.${ROOT_CLASS} .yt-focus-content {
+      display: flex !important;
+      flex-direction: column !important;
+      justify-content: center !important;
+      gap: 2px !important;
+      min-width: 0 !important;
+      height: ${CONFIG.AVATAR_SIZE}px !important;
+      text-align: left !important;
     }
 
     html.${ROOT_CLASS} .yt-focus-title {
-      grid-column: 1 !important;
+      display: block !important;
+      height: 22px !important;
       min-width: 0 !important;
-      height: 20px !important;
       overflow: hidden !important;
-      color: var(--yt-focus-text) !important;
+      color: var(--focus-text) !important;
+      font-size: 14px !important;
+      line-height: 22px !important;
+      font-weight: 400 !important;
       white-space: nowrap !important;
       text-overflow: ellipsis !important;
-      font-size: 13px !important;
-      line-height: 20px !important;
-      font-weight: var(--yt-focus-weight, ${CONFIG.BASE_WEIGHT}) !important;
-      letter-spacing: -.012em !important;
-      opacity: var(--yt-focus-opacity, 1) !important;
-      transition: font-weight .3s ease, opacity .3s ease !important;
-    }
-
-    html.${ROOT_CLASS} .yt-focus-title a {
-      color: inherit !important;
+      opacity: 1 !important;
       text-decoration: none !important;
     }
 
-    html.${ROOT_CLASS} .yt-focus-age {
-      grid-column: 2 !important;
-      width: 70px !important;
-      height: 20px !important;
-      box-sizing: border-box !important;
+    html.${ROOT_CLASS} .yt-focus-meta {
+      display: flex !important;
+      align-items: center !important;
+      justify-content: flex-start !important;
+      gap: 6px !important;
+      min-width: 0 !important;
+      height: 16px !important;
       overflow: hidden !important;
-      padding-right: 10px !important;
-      color: var(--yt-focus-muted) !important;
+      color: var(--focus-muted) !important;
+      font-size: 12px !important;
+      line-height: 16px !important;
+      font-weight: 400 !important;
       white-space: nowrap !important;
-      text-overflow: ellipsis !important;
-      text-align: right !important;
-      font-size: 11px !important;
-      line-height: 20px !important;
-      opacity: .66 !important;
-    }
-
-    html.${ROOT_CLASS} .yt-focus-today {
-      color: var(--yt-focus-accent) !important;
-      opacity: .94 !important;
+      opacity: 1 !important;
     }
 
     html.${ROOT_CLASS} .yt-focus-channel {
-      grid-column: 3 !important;
+      flex: 0 1 auto !important;
       min-width: 0 !important;
-      height: 20px !important;
       overflow: hidden !important;
-      padding-left: 10px !important;
-      color: var(--yt-focus-muted) !important;
-      white-space: nowrap !important;
       text-overflow: ellipsis !important;
-      font-size: 11px !important;
-      line-height: 20px !important;
-      opacity: .62 !important;
-    }
-
-    html.${ROOT_CLASS} .yt-focus-channel a {
       color: inherit !important;
       text-decoration: none !important;
+      font: inherit !important;
+    }
+
+    html.${ROOT_CLASS} .yt-focus-age,
+    html.${ROOT_CLASS} .yt-focus-views,
+    html.${ROOT_CLASS} .yt-focus-separator {
+      flex: 0 0 auto !important;
+      color: inherit !important;
+      font: inherit !important;
+    }
+
+    html.${ROOT_CLASS} a.yt-focus-title:hover,
+    html.${ROOT_CLASS} a.yt-focus-channel:hover {
+      text-decoration: underline !important;
     }
   `;
 
   const style = document.createElement('style');
   style.textContent = css;
-  document.documentElement.appendChild(style);
 
-  function isHomePage() {
+  const states = new WeakMap();
+  const failedImages = new Map();
+
+  const clean = value =>
+    String(value || '').replace(/\s+/g, ' ').trim();
+
+  const cleanName = value =>
+    clean(value)
+      .replace(/자동\s*더빙/gi, '')
+      .replace(/auto[-\s]?dubbed/gi, '')
+      .trim();
+
+  function isHome() {
     return (
       location.hostname === 'www.youtube.com' &&
       location.pathname === '/'
     );
   }
 
-  const cleanText = value =>
-    String(value || '').replace(/\s+/g, ' ').trim();
-
-  const clamp01 = value =>
-    Math.max(0, Math.min(1, value));
-
-  const removeDubText = value =>
-    cleanText(value)
-      .replace(/자동\s*더빙/gi, '')
-      .replace(/auto[-\s]?dubbed/gi, '')
-      .trim();
-
-  function percentile(values, value) {
-    const sorted = values
-      .filter(Number.isFinite)
-      .slice()
-      .sort((a, b) => a - b);
-
-    if (sorted.length < 2) return 0.5;
-
-    let low = 0;
-    let high = sorted.length;
-
-    while (low < high) {
-      const middle = (low + high) >> 1;
-
-      if (sorted[middle] <= value) low = middle + 1;
-      else high = middle;
-    }
-
-    return clamp01((low - 1) / (sorted.length - 1));
+  function nodes(card, selector) {
+    return Array.from(card.querySelectorAll(selector))
+      .filter(node => !node.closest('.yt-focus-row'));
   }
 
-  function parseViews(raw) {
-    const value = cleanText(raw)
-      .replace(/조회수/g, '')
-      .replace(/views?/gi, '')
-      .replace(/,/g, '');
+  function textOf(value) {
+    if (typeof value === 'string') return clean(value);
+    if (!value || typeof value !== 'object') return '';
 
-    if (!value) return null;
-
-    const match = value.match(/([\d.]+)\s*(억|만|천|[KMB])/i);
-
-    if (match) {
-      const number = parseFloat(match[1]);
-      const unit = match[2].toLowerCase();
-
-      const factor = {
-        억: 1e8,
-        만: 1e4,
-        천: 1e3,
-        k: 1e3,
-        m: 1e6,
-        b: 1e9
-      }[unit];
-
-      return Number.isFinite(number) && factor
-        ? Math.round(number * factor)
-        : null;
-    }
-
-    const number = parseFloat(value.match(/[\d.]+/)?.[0]);
-
-    return Number.isFinite(number) ? Math.round(number) : null;
-  }
-
-  function parseDuration(raw) {
-    const value = cleanText(raw).replace(/,/g, '');
-
-    let match = value.match(/^(?:(\d+):)?(\d{1,2}):(\d{2})$/);
-
-    if (match) {
-      return (
-        (match[1] ? Number(match[1]) * 3600 : 0) +
-        Number(match[2]) * 60 +
-        Number(match[3])
-      );
-    }
-
-    match = value.match(
-      /(?:(\d+)\s*시간)?\s*(?:(\d+)\s*분)?\s*(?:(\d+)\s*초)?/
+    return clean(
+      value.simpleText ||
+      value.content ||
+      value.runs?.map(run => run.text || '').join('') ||
+      ''
     );
-
-    return match && (match[1] || match[2] || match[3])
-      ? (Number(match[1]) || 0) * 3600 +
-        (Number(match[2]) || 0) * 60 +
-        (Number(match[3]) || 0)
-      : null;
   }
 
-  function getDuration(card) {
-    const selector = [
-      '#text.ytd-thumbnail-overlay-time-status-renderer',
-      'ytd-thumbnail-overlay-time-status-renderer span',
-      'badge-shape .yt-badge-shape__text',
-      '[aria-label*="분"]',
-      '[aria-label*="시간"]',
-      '[aria-label*="minute"]',
-      '[aria-label*="hour"]'
-    ].join(',');
+  function dataRoots(card) {
+    const elements = [
+      card,
+      ...nodes(
+        card,
+        'ytd-rich-grid-media, ytd-video-renderer, ' +
+        'ytd-grid-video-renderer, yt-lockup-view-model'
+      )
+    ];
 
-    for (const node of card.querySelectorAll(selector)) {
-      for (const candidate of [
-        node.textContent,
-        node.getAttribute('aria-label'),
-        node.getAttribute('title')
+    const roots = [];
+
+    for (const element of elements) {
+      for (const data of [
+        element.data,
+        element.__data?.data,
+        element.__data?.renderer
       ]) {
-        const duration = parseDuration(candidate);
-
-        if (duration !== null) return duration;
+        if (data && typeof data === 'object') roots.push(data);
       }
+    }
+
+    return roots;
+  }
+
+  function collectData(card) {
+    const result = {
+      views: [],
+      ages: [],
+      avatars: []
+    };
+
+    const seen = new WeakSet();
+    let budget = 1200;
+
+    function walk(value, depth = 0, avatarContext = false) {
+      if (!value || typeof value !== 'object') return;
+      if (depth > 12 || budget-- <= 0 || seen.has(value)) return;
+      seen.add(value);
+
+      if (Array.isArray(value)) {
+        for (const item of value) walk(item, depth + 1, avatarContext);
+        return;
+      }
+
+      if (avatarContext && typeof value.url === 'string') {
+        result.avatars.push({
+          url: value.url,
+          width: Number(value.width) || 0
+        });
+      }
+
+      for (const [key, child] of Object.entries(value)) {
+        if (/^(viewCountText|shortViewCountText|viewCount)$/.test(key)) {
+          const text = textOf(child);
+          if (text) result.views.push(text);
+        }
+
+        if (/^(publishedTimeText|publishTimeText)$/.test(key)) {
+          const text = textOf(child);
+          if (text) result.ages.push(text);
+        }
+
+        const isAvatar = avatarContext ||
+          /channelThumbnail|channelAvatar|avatar|decoratedAvatar/i.test(key);
+
+        if (child && typeof child === 'object') {
+          walk(child, depth + 1, isAvatar);
+        } else if (
+          isAvatar &&
+          typeof child === 'string' &&
+          /^(?:https?:)?\/\//.test(child) &&
+          /url|src/i.test(key)
+        ) {
+          result.avatars.push({ url: child, width: 0 });
+        }
+      }
+    }
+
+    for (const root of dataRoots(card)) walk(root);
+    return result;
+  }
+
+  function parseViews(raw, allowPlain = false) {
+    const text = clean(raw).replace(/,/g, '');
+
+    if (/조회수\s*없음|no views/i.test(text)) return 0;
+
+    const match =
+      text.match(
+        /조회수\s*(\d+(?:\.\d+)?)\s*(억|만|천|[KMB])?/i
+      ) ||
+      text.match(
+        /(\d+(?:\.\d+)?)\s*(억|만|천|[KMB])?\s*(?:회|views?)\b/i
+      ) ||
+      text.match(
+        /^(\d+(?:\.\d+)?)\s*(억|만|천|[KMB])\s*(?:회|views?)?$/i
+      ) ||
+      (allowPlain
+        ? text.match(/^(\d+(?:\.\d+)?)\s*(억|만|천|[KMB])?$/i)
+        : null);
+
+    if (!match) return null;
+
+    const factor = {
+      '': 1,
+      억: 1e8,
+      만: 1e4,
+      천: 1e3,
+      k: 1e3,
+      m: 1e6,
+      b: 1e9
+    }[(match[2] || '').toLowerCase()];
+
+    const value = Number(match[1]) * factor;
+    return Number.isFinite(value) ? Math.round(value) : null;
+  }
+
+  function getViews(card, data) {
+    // 内部の viewCountText を優先し、視聴中人数との混同を避ける。
+    for (const text of data.views) {
+      const value = parseViews(text, true);
+      if (value !== null) return value;
+    }
+
+    for (const node of nodes(card, META_SELECTOR)) {
+      const text = clean(node.textContent);
+      if (/視聴中|視聴者|시청 중|시청중|watching|viewers/i.test(text)) continue;
+
+      const value = parseViews(text, true);
+      if (value !== null) return value;
+    }
+
+    for (const node of nodes(card, '[aria-label]')) {
+      const value = parseViews(node.getAttribute('aria-label'));
+      if (value !== null) return value;
     }
 
     return null;
   }
 
   function parseAge(raw) {
-    const value = cleanText(raw)
-      .replace(/게시됨/g, '')
-      .replace(/전$/g, '')
-      .trim();
+    const text = clean(raw);
 
-    if (!value) return null;
+    const korean = text.match(
+      /(\d+)\s*(초|분|시간|일|주|개월|달|년)\s*전/
+    );
 
-    const short =
-      value.match(/(\d+)\s*(초|분|시간)\s*전?$/) ||
-      value.match(
-        /\b(\d+)\s*(second|seconds|sec|secs|minute|minutes|min|mins|hour|hours|hr|hrs)\b/i
-      );
-
-    if (short) {
-      const number = Number(short[1]);
-      const unit = short[2].toLowerCase();
-
-      const hours =
-        unit === '시간' || unit.startsWith('hour') || unit.startsWith('hr')
-          ? number
-          : unit === '분' || unit.startsWith('min')
-            ? number / 60
-            : number / 3600;
-
-      return {
-        label: '오늘',
-        days: hours / 24,
-        hours,
-        isToday: true
-      };
+    if (korean) {
+      const unit = korean[2] === '달' ? '개월' : korean[2];
+      return `${Number(korean[1])}${unit} 전`;
     }
 
-    const patterns = [
-      [/([\d]+)\s*일/, 1, '일'],
-      [/([\d]+)\s*주/, 7, '주'],
-      [/([\d]+)\s*(?:개월|달)/, 30.4375, '달'],
-      [/([\d]+)\s*년/, 365.25, '년'],
-      [/([\d]+)\s*d\b/i, 1, '일'],
-      [/([\d]+)\s*w\b/i, 7, '주'],
-      [/([\d]+)\s*mo\b/i, 30.4375, '달'],
-      [/([\d]+)\s*y\b/i, 365.25, '년']
+    const english = text.match(
+      /\b(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?)\s+ago\b/i
+    );
+
+    if (english) {
+      const unit = english[2].toLowerCase();
+      const label =
+        /^(second|sec)/.test(unit) ? '초' :
+        /^(minute|min)/.test(unit) ? '분' :
+        /^(hour|hr)/.test(unit) ? '시간' :
+        /^day/.test(unit) ? '일' :
+        /^week/.test(unit) ? '주' :
+        /^month/.test(unit) ? '개월' : '년';
+
+      return `${Number(english[1])}${label} 전`;
+    }
+
+    if (/^(오늘|today)$/i.test(text)) return '오늘';
+    if (/^(어제|yesterday)$/i.test(text)) return '어제';
+
+    return '';
+  }
+
+  function getAge(card, data) {
+    const candidates = [
+      ...data.ages,
+      ...nodes(card, META_SELECTOR).map(node => node.textContent),
+      ...nodes(card, TITLE_SELECTOR).map(node =>
+        node.getAttribute('aria-label')
+      )
     ];
 
-    for (const [regex, multiplier, unit] of patterns) {
-      const match = value.match(regex);
-
-      if (!match) continue;
-
-      const number = Number(match[1]);
-      const days = number * multiplier;
-
-      return {
-        label: number === 1 && unit === '일'
-          ? '어제'
-          : `${number}${unit}`,
-        days,
-        hours: days * 24,
-        isToday: false
-      };
+    for (const candidate of candidates) {
+      const age = parseAge(candidate);
+      if (age) return age;
     }
 
-    return null;
-  }
-
-  function getAgeSource(card) {
-    for (const node of card.querySelectorAll(AGE_SELECTOR)) {
-      const age = parseAge(node.textContent);
-
-      if (age) return { age };
-    }
-
-    return { age: null };
-  }
-
-  function getVideoType(card) {
-    if (card.querySelector('a[href*="/shorts/"]')) return null;
-
-    for (const link of card.querySelectorAll('a[href]')) {
-      const href = link.getAttribute('href') || '';
-
-      if (
-        href.includes('/playlist?') ||
-        href.includes('?list=') ||
-        href.includes('&list=')
-      ) {
-        return null;
-      }
-
-      if (href.includes('/watch?')) {
-        try {
-          const url = new URL(href, location.origin);
-
-          if (
-            url.pathname === '/watch' &&
-            url.searchParams.has('v')
-          ) {
-            return 'video';
-          }
-        } catch {}
-      }
-    }
-
-    return null;
-  }
-
-  function isLiveVideo(card) {
-    if (
-      card.querySelector(
-        '[overlay-style="LIVE"], [overlay-style="live"], [is-live-video]'
-      )
-    ) {
-      return true;
-    }
-
-    return Array.from(card.querySelectorAll('[aria-label], [title]'))
-      .some(node => {
-        const value = cleanText(
-          [
-            node.getAttribute('aria-label'),
-            node.getAttribute('title')
-          ].filter(Boolean).join(' ')
-        );
-
-        return /\b(LIVE|라이브|생방송)\b/i.test(value);
-      });
+    return '';
   }
 
   function getTitle(card) {
-    const source = card.querySelector(TITLE_SELECTOR);
+    for (const source of nodes(card, TITLE_SELECTOR)) {
+      const text = cleanName(
+        source.textContent || source.getAttribute('title')
+      );
+
+      if (!text || !source.href) continue;
+
+      try {
+        const url = new URL(source.href, location.origin);
+        if (url.pathname !== '/watch' || !url.searchParams.has('v')) continue;
+
+        return {
+          text,
+          href: url.href,
+          id: url.searchParams.get('v')
+        };
+      } catch {}
+    }
+
+    return null;
+  }
+
+  function getChannel(card) {
+    const source = nodes(card, CHANNEL_SELECTOR)
+      .find(node => clean(node.textContent));
+
+    const fallback = nodes(
+      card,
+      'ytd-channel-name, #channel-name'
+    )[0];
 
     return {
-      text: removeDubText(source?.textContent || ''),
+      text: cleanName(source?.textContent || fallback?.textContent),
       href: source?.href || ''
     };
   }
 
-  function getChannel(card) {
-    const source = card.querySelector(CHANNEL_SELECTOR);
+  function normalizeImage(raw) {
+    if (!raw || /^(data:|blob:)/i.test(raw)) return '';
 
-    if (source) {
-      return {
-        text: removeDubText(source.textContent),
-        href: source.href || ''
-      };
+    try {
+      const url = new URL(raw, location.origin);
+      if (!/^https?:$/.test(url.protocol)) return '';
+      return url.href;
+    } catch {
+      return '';
     }
-
-    const fallback = card.querySelector(
-      'ytd-channel-name, #channel-name'
-    );
-
-    return {
-      text: removeDubText(fallback?.textContent || ''),
-      href: ''
-    };
   }
 
-  function createCell(className, text = '') {
-    const element = document.createElement('div');
+  function getAvatar(card, data) {
+    const candidates = [];
 
-    element.className = className;
-    element.textContent = text;
+    for (const image of nodes(card, AVATAR_SELECTOR)) {
+      candidates.push(
+        image.currentSrc,
+        image.getAttribute('src'),
+        image.getAttribute('data-src'),
+        image.getAttribute('data-thumb')
+      );
 
-    return element;
-  }
-
-  function createTitleElement(title) {
-    const element = createCell('yt-focus-title');
-
-    if (title.href) {
-      const link = document.createElement('a');
-
-      link.href = title.href;
-      link.textContent = title.text;
-
-      element.appendChild(link);
-    } else {
-      element.textContent = title.text;
-    }
-
-    return element;
-  }
-
-  function createChannelElement(channel) {
-    const element = createCell('yt-focus-channel');
-
-    if (channel.href) {
-      const link = document.createElement('a');
-
-      link.href = channel.href;
-      link.textContent = channel.text;
-
-      element.appendChild(link);
-    } else {
-      element.textContent = channel.text;
-    }
-
-    return element;
-  }
-
-  function getLengthSignal(seconds) {
-    if (seconds === null) return 0.5;
-
-    const minutes = seconds / 60;
-
-    return clamp01(
-      0.20 + 0.80 * (1 - Math.exp(-minutes / 10))
-    );
-  }
-
-  function getSignals(views, age, duration) {
-    const days = Math.max(
-      age.days,
-      CONFIG.MIN_AGE_FOR_VELOCITY_HOURS / 24
-    );
-
-    const viewsPerDay = views / days;
-
-    return {
-      velocity: Math.log1p(viewsPerDay),
-      views: Math.log1p(views),
-      freshness: Math.exp(-age.days / CONFIG.AGE_HALF_LIFE_DAYS),
-      length: getLengthSignal(duration)
-    };
-  }
-
-  function recalculate() {
-    if (!isHomePage()) return;
-
-    const rows = Array.from(
-      document.querySelectorAll('.yt-focus-row[data-analyzed]')
-    );
-
-    if (!rows.length) return;
-
-    const data = rows.map(row => ({
-      row,
-      velocity: Number(row.dataset.velocity),
-      views: Number(row.dataset.viewsLog),
-      freshness: Number(row.dataset.freshness),
-      length: Number(row.dataset.length)
-    }));
-
-    const velocityValues = data.map(item => item.velocity);
-    const viewValues = data.map(item => item.views);
-    const freshnessValues = data.map(item => item.freshness);
-    const lengthValues = data.map(item => item.length);
-
-    const scores = data.map(item => {
-      const score =
-        CONFIG.VELOCITY_WEIGHT *
-          percentile(velocityValues, item.velocity) +
-        CONFIG.VIEW_WEIGHT *
-          percentile(viewValues, item.views) +
-        CONFIG.LENGTH_WEIGHT *
-          percentile(lengthValues, item.length) +
-        CONFIG.FRESHNESS_WEIGHT *
-          percentile(freshnessValues, item.freshness);
-
-      item.score = score;
-
-      return score;
-    });
-
-    for (const item of data) {
-      const p = percentile(scores, item.score);
-
-      let weight = CONFIG.BASE_WEIGHT;
-      let opacity = 1;
-
-      if (p >= CONFIG.TOP_TIER) {
-        const t = clamp01(
-          (p - CONFIG.TOP_TIER) /
-            (1 - CONFIG.TOP_TIER)
-        );
-
-        weight =
-          CONFIG.IMPORTANT_WEIGHT +
-          (CONFIG.TOP_WEIGHT - CONFIG.IMPORTANT_WEIGHT) * t;
-      } else if (p >= CONFIG.IMPORTANT_TIER) {
-        const t = clamp01(
-          (p - CONFIG.IMPORTANT_TIER) /
-            (CONFIG.TOP_TIER - CONFIG.IMPORTANT_TIER)
-        );
-
-        weight =
-          CONFIG.BASE_WEIGHT +
-          (CONFIG.IMPORTANT_WEIGHT - CONFIG.BASE_WEIGHT) * t;
-      } else if (p < CONFIG.VERY_LOW_TIER) {
-        const t = clamp01(p / CONFIG.VERY_LOW_TIER);
-
-        opacity =
-          CONFIG.VERY_LOW_OPACITY +
-          (CONFIG.LOW_OPACITY - CONFIG.VERY_LOW_OPACITY) * t;
-      } else if (p < CONFIG.LOW_TIER) {
-        const t = clamp01(
-          (p - CONFIG.VERY_LOW_TIER) /
-            (CONFIG.LOW_TIER - CONFIG.VERY_LOW_TIER)
-        );
-
-        opacity =
-          CONFIG.LOW_OPACITY +
-          (1 - CONFIG.LOW_OPACITY) * t;
+      const srcset = image.getAttribute('srcset');
+      if (srcset) {
+        for (const entry of srcset.split(',')) {
+          candidates.push(entry.trim().split(/\s+/)[0]);
+        }
       }
-
-      item.row.style.setProperty(
-        '--yt-focus-weight',
-        String(Math.round(weight))
-      );
-
-      item.row.style.setProperty(
-        '--yt-focus-opacity',
-        opacity.toFixed(3)
-      );
-    }
-  }
-
-  function render(card, title, age, channel, signals) {
-    let row = card.querySelector('.yt-focus-row');
-
-    if (!row) {
-      row = document.createElement('div');
-      row.className = 'yt-focus-row';
-
-      card.prepend(row);
     }
 
-    row.dataset.analyzed = '1';
-    row.dataset.velocity = signals.velocity;
-    row.dataset.viewsLog = signals.views;
-    row.dataset.freshness = signals.freshness;
-    row.dataset.length = signals.length;
-
-    const ageElement = createCell(
-      'yt-focus-age',
-      age.label
+    candidates.push(
+      ...data.avatars
+        .sort((a, b) => b.width - a.width)
+        .map(item => item.url)
     );
 
-    if (age.isToday) {
-      ageElement.classList.add('yt-focus-today');
+    for (const candidate of candidates) {
+      const url = normalizeImage(candidate);
+      if (!url) continue;
+
+      const failedAt = failedImages.get(url);
+      if (failedAt && Date.now() - failedAt < 60000) continue;
+
+      return url;
     }
 
-    row.replaceChildren(
-      createTitleElement(title),
-      ageElement,
-      createChannelElement(channel)
-    );
+    return '';
   }
 
-  function finish(card) {
-    card.setAttribute(DONE_ATTR, '1');
-  }
-
-  function classify(card) {
-    if (!isHomePage()) return;
-    if (!card || card.getAttribute(DONE_ATTR) === '1') return;
-
-    if (getVideoType(card) === null || isLiveVideo(card)) {
-      finish(card);
-      return;
-    }
-
-    const views = parseViews(card.textContent);
-    const age = getAgeSource(card).age;
-
-    if (views === null || age === null) {
-      const retries = Number(
-        card.getAttribute(RETRY_ATTR) || 0
-      );
-
-      if (retries < CONFIG.MAX_RETRIES) {
-        card.setAttribute(
-          RETRY_ATTR,
-          String(retries + 1)
-        );
-
-        window.setTimeout(
-          () => classify(card),
-          CONFIG.RETRY_DELAY_MS
-        );
-      }
-
-      return;
-    }
-
-    if (views < CONFIG.MIN_VIEWS) {
-      card.classList.add('yt-focus-filtered');
-      finish(card);
-      return;
-    }
-
-    finish(card);
-
-    render(
+  function isLive(card) {
+    return nodes(
       card,
-      getTitle(card),
-      age,
-      getChannel(card),
-      getSignals(views, age, getDuration(card))
+      '[overlay-style="LIVE"], [overlay-style="live"], [is-live-video]'
+    ).length > 0 ||
+      nodes(card, 'ytd-badge-supported-renderer, badge-shape')
+        .some(node => /라이브|생방송|\bLIVE\b/i.test(node.textContent));
+  }
+
+  function element(tag, className, text = '') {
+    const node = document.createElement(tag);
+    node.className = className;
+    node.textContent = text;
+    return node;
+  }
+
+  function render(card, info, state) {
+    const row = element('div', 'yt-focus-row');
+
+    const avatar = element(
+      info.channel.href ? 'a' : 'div',
+      'yt-focus-avatar'
     );
-  }
 
-  function resetHomeTransform() {
-    document.documentElement.classList.remove(ROOT_CLASS);
+    if (info.channel.href) avatar.href = info.channel.href;
+    avatar.title = info.channel.text;
+    avatar.setAttribute('aria-label', info.channel.text || '채널');
 
-    document.querySelectorAll(
-      `${CARD_SELECTOR}[${DONE_ATTR}]`
-    ).forEach(card => {
-      card.removeAttribute(DONE_ATTR);
-      card.removeAttribute(RETRY_ATTR);
-      card.classList.remove('yt-focus-filtered');
+    const fallback = () => {
+      avatar.textContent = Array.from(info.channel.text || '?')[0];
+    };
 
-      const row = card.querySelector('.yt-focus-row');
+    if (info.avatar) {
+      const image = document.createElement('img');
+      image.alt = '';
+      image.decoding = 'async';
 
-      if (row) {
-        row.remove();
-      }
+      // 元画像の lazy loading に依存せず、この画像は即時読み込み。
+      image.loading = 'eager';
 
-      card.style.removeProperty('--yt-focus-weight');
-      card.style.removeProperty('--yt-focus-opacity');
+      image.addEventListener('error', () => {
+        failedImages.set(info.avatar, Date.now());
+        fallback();
+
+        if (states.get(card) === state) {
+          state.signature = '';
+          scheduleScan(100);
+        }
+      }, { once: true });
+
+      image.src = info.avatar;
+      avatar.append(image);
+    } else {
+      fallback();
+    }
+
+    const content = element('div', 'yt-focus-content');
+    const title = element('a', 'yt-focus-title', info.title.text);
+    title.href = info.title.href;
+    title.title = info.title.text;
+
+    const meta = element('div', 'yt-focus-meta');
+    const parts = [];
+
+    if (info.channel.text) {
+      const channel = element(
+        info.channel.href ? 'a' : 'span',
+        'yt-focus-channel',
+        info.channel.text
+      );
+
+      if (info.channel.href) channel.href = info.channel.href;
+      channel.title = info.channel.text;
+      parts.push(channel);
+    }
+
+    parts.push(
+      element('span', 'yt-focus-age', info.age),
+      element(
+        'span',
+        'yt-focus-views',
+        info.views === null
+          ? '조회수 확인 중'
+          : `${Math.round(info.views / 10000)}만`
+      )
+    );
+
+    parts.forEach((part, index) => {
+      if (index) meta.append(element('span', 'yt-focus-separator', '·'));
+      meta.append(part);
     });
+
+    content.append(title, meta);
+    row.append(avatar, content);
+
+    card.querySelector(':scope > .yt-focus-row')?.remove();
+    card.prepend(row);
+    card.classList.add(PROCESSED);
   }
 
-  function scan(root = document) {
-    if (!isHomePage()) return;
+  function processCard(card) {
+    if (!card.isConnected || !isHome()) return;
+    if (card.parentElement?.closest(CARD_SELECTOR)) return;
+
+    const title = getTitle(card);
+    if (!title) return;
+
+    let state = states.get(card);
+
+    // YouTube が既存カードを別動画に再利用した場合も再処理。
+    if (!state || state.id !== title.id) {
+      card.classList.remove(PROCESSED, FILTERED);
+      card.querySelector(':scope > .yt-focus-row')?.remove();
+
+      state = {
+        id: title.id,
+        signature: ''
+      };
+
+      states.set(card, state);
+    }
+
+    const data = collectData(card);
+    const views = getViews(card, data);
+
+    if (views !== null && views < CONFIG.MIN_VIEWS) {
+      card.classList.add(FILTERED);
+      state.signature = '';
+      return;
+    }
+
+    card.classList.remove(FILTERED);
+
+    const channel = getChannel(card);
+    const age = getAge(card, data) ||
+      (isLive(card) ? 'ライブ配信中'.replace('ライブ配信中', '라이브 중') : '업로드 시점 확인 중');
+
+    const avatar = getAvatar(card, data);
+
+    const signature = JSON.stringify([
+      title.text,
+      title.href,
+      channel.text,
+      channel.href,
+      views,
+      age,
+      avatar
+    ]);
 
     if (
-      root.nodeType === Node.ELEMENT_NODE &&
-      root.matches?.(CARD_SELECTOR)
+      state.signature === signature &&
+      card.querySelector(':scope > .yt-focus-row')
     ) {
-      classify(root);
+      return;
     }
 
-    root.querySelectorAll?.(CARD_SELECTOR).forEach(classify);
+    state.signature = signature;
+
+    render(card, {
+      title,
+      channel,
+      views,
+      age,
+      avatar
+    }, state);
   }
 
-  let queued = false;
+  function reset() {
+    document.documentElement?.classList.remove(ROOT_CLASS);
 
-  function queueScan(delay = 0) {
-    if (queued) return;
+    document.querySelectorAll(
+      `.${PROCESSED}, .${FILTERED}`
+    ).forEach(card => {
+      card.classList.remove(PROCESSED, FILTERED);
+      card.querySelector(':scope > .yt-focus-row')?.remove();
+      states.delete(card);
+    });
+  }
 
-    queued = true;
+  function scan() {
+    if (!document.documentElement) return;
 
-    const run = () => {
-      queued = false;
+    if (!style.isConnected) document.documentElement.append(style);
 
-      if (!isHomePage()) {
-        resetHomeTransform();
-        return;
-      }
-
-      document.documentElement.classList.add(ROOT_CLASS);
-
-      scan(document);
-      recalculate();
-    };
-
-    if (delay > 0) {
-      window.setTimeout(run, delay);
-    } else {
-      requestAnimationFrame(run);
+    if (!isHome()) {
+      reset();
+      return;
     }
+
+    document.documentElement.classList.add(ROOT_CLASS);
+
+    document.querySelectorAll(CARD_SELECTOR).forEach(card => {
+      try {
+        processCard(card);
+      } catch (error) {
+        console.debug('[YouTube Focus UI]', error);
+      }
+    });
+  }
+
+  let scanTimer = 0;
+
+  function scheduleScan(delay = 80) {
+    if (scanTimer) return;
+
+    scanTimer = window.setTimeout(() => {
+      scanTimer = 0;
+      scan();
+    }, delay);
   }
 
   const observer = new MutationObserver(mutations => {
-    if (!isHomePage()) return;
+    if (!isHome()) return;
 
-    const hasAddedNodes = mutations.some(
-      mutation =>
-        mutation.type === 'childList' &&
-        mutation.addedNodes.length
-    );
+    const relevant = mutations.some(mutation => {
+      const target = mutation.target.nodeType === Node.ELEMENT_NODE
+        ? mutation.target
+        : mutation.target.parentElement;
 
-    if (hasAddedNodes) {
-      queueScan();
-    }
+      if (target?.closest('.yt-focus-row')) return false;
+
+      if (mutation.type !== 'childList') return true;
+
+      return [...mutation.addedNodes, ...mutation.removedNodes]
+        .some(node => {
+          return !(
+            node.nodeType === Node.ELEMENT_NODE &&
+            node.matches('.yt-focus-row')
+          );
+        });
+    });
+
+    if (relevant) scheduleScan();
   });
 
   function start() {
     observer.observe(document.documentElement, {
       childList: true,
-      subtree: true
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: [
+        'src',
+        'srcset',
+        'data-src',
+        'data-thumb',
+        'href',
+        'aria-label'
+      ]
     });
 
-    queueScan();
+    scan();
+
+    // スクロールがなくても、末尾カードと遅延データを継続再確認。
+    window.setInterval(() => {
+      if (isHome() && !document.hidden) scheduleScan(0);
+    }, CONFIG.RESCAN_INTERVAL_MS);
   }
 
-  window.addEventListener(
-    'yt-navigate-finish',
-    () => queueScan(250)
-  );
+  window.addEventListener('yt-navigate-start', reset);
 
-  window.addEventListener(
-    'popstate',
-    () => queueScan(320)
-  );
+  window.addEventListener('yt-navigate-finish', () => {
+    scheduleScan(100);
+    window.setTimeout(() => scheduleScan(0), 600);
+    window.setTimeout(() => scheduleScan(0), 1500);
+  });
+
+  window.addEventListener('yt-page-data-updated', () => scheduleScan());
+  window.addEventListener('yt-rendererstamper-finished', () => scheduleScan());
+  window.addEventListener('popstate', () => scheduleScan(150));
+
+  window.addEventListener('scroll', () => scheduleScan(100), {
+    passive: true
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) scheduleScan(0);
+  });
+
+  document.addEventListener('load', event => {
+    const target = event.target;
+
+    if (
+      target instanceof HTMLImageElement &&
+      !target.closest('.yt-focus-row') &&
+      target.closest(CARD_SELECTOR)
+    ) {
+      scheduleScan();
+    }
+  }, true);
 
   if (document.readyState === 'loading') {
-    document.addEventListener(
-      'DOMContentLoaded',
-      start,
-      { once: true }
-    );
+    document.addEventListener('DOMContentLoaded', start, { once: true });
   } else {
     start();
   }
